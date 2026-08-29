@@ -1,0 +1,8 @@
+# Local development only. Compose merges this over compose.yaml
+# automatically. Production runs the base file alone, so the
+# database is reachable only on the internal Docker network.
+
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
