@@ -26,12 +26,12 @@ TablePlus. Set `POSTGRES_PORT` in `.env` if that port is already in use.
 
 | File | Purpose |
 |---|---|
-| `compose.yaml` | Base definition — true in every environment |
+| `compose.yaml` | Base definition, true in every environment |
 | `compose.override.yaml` | Local development only; Compose merges it automatically |
 
 The host port lives in the override file, not the base. Production runs `compose.yaml`
 alone, leaving the database reachable only on the internal Docker network. This split is how
-"exposed in development, not in production" is enforced — there is no flag to remember.
+"exposed in development, not in production" is enforced. There is no flag to remember.
 
 ## Data
 
