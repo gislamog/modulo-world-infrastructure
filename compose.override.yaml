@@ -16,6 +16,12 @@ services:
       # shadows it, and modules built for Windows or for a different CPU
       # architecture are loaded instead of the Linux ones.
       - /app/node_modules
+    environment:
+      # tsc watches through inotify, which receives no events for files
+      # edited on the Windows side of the mount. Polling is the only
+      # thing that works across that boundary.
+      TSC_WATCHFILE: UseFsEventsWithFallbackDynamicPolling
+      CHOKIDAR_USEPOLLING: "true"
 
   frontend:
     volumes:
