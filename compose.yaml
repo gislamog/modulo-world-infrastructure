@@ -24,6 +24,51 @@ services:
       retries: 5
       start_period: 30s
 
+  api:
+    build:
+      context: ../modulo-world-backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      IP_HASH_SALT: ${IP_HASH_SALT:?IP_HASH_SALT is required}
+    depends_on:
+      postgres:
+        # Wait for a database that answers queries, not just a started
+        # container. Nest would otherwise crash on its first connection.
+        condition: service_healthy
+    networks:
+      - modulo-world
+
+  frontend:
+    build:
+      context: ../modulo-world-frontend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      PUBLIC_API_BASE_URL: /api
+      PUBLIC_SITE_URL: http://localhost:${HTTP_PORT:-80}
+    networks:
+      - modulo-world
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      # The only published port. Everything else is internal.
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      # Both are included from the http block by the base image. The map
+      # file is loaded first because default.conf references its variable.
+      - ./nginx/upgrade-map.conf:/etc/nginx/conf.d/00-upgrade-map.conf:ro
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - modulo-world
+
 volumes:
   postgres-data:
 
