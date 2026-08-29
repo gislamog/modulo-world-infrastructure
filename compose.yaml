@@ -38,6 +38,14 @@ services:
         # Wait for a database that answers queries, not just a started
         # container. Nest would otherwise crash on its first connection.
         condition: service_healthy
+    healthcheck:
+      # Consumes the API's own health endpoint, which queries the database.
+      # A 503 marks the container unhealthy.
+      test: ['CMD', 'node', '-e', "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     networks:
       - modulo-world
 
