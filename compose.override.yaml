@@ -6,3 +6,22 @@ services:
   postgres:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
+
+  api:
+    volumes:
+      # Source is mounted so Nest's watch mode sees host edits.
+      - ../modulo-world-backend:/app
+      # An anonymous volume masks the host's node_modules with the copy
+      # installed inside the image. Without this the bind mount above
+      # shadows it, and modules built for Windows or for a different CPU
+      # architecture are loaded instead of the Linux ones.
+      - /app/node_modules
+
+  frontend:
+    volumes:
+      - ../modulo-world-frontend:/app
+      - /app/node_modules
+    environment:
+      # Vite's file watcher does not receive inotify events across the
+      # Windows/WSL boundary; polling is slower but actually works.
+      CHOKIDAR_USEPOLLING: "true"
