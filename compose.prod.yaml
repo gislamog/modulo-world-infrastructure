@@ -106,6 +106,10 @@ services:
       - "443:443"
     volumes:
       - ./nginx/upgrade-map.conf:/etc/nginx/conf.d/00-upgrade-map.conf:ro
+      # Shared TLS policy, included by the server blocks in default.conf.
+      # The 00- prefix is not cosmetic: nginx includes conf.d in
+      # alphabetical order, and an include must be defined before use.
+      - ./nginx/tls-params.conf:/etc/nginx/conf.d/00-tls-params.conf:ro
       # Which server block is mounted is a variable, not an edit. The
       # first deploy uses nginx.bootstrap.conf because nginx will not
       # start with an ssl_certificate that does not exist yet; once the
