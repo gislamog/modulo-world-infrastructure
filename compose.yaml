@@ -55,7 +55,13 @@ services:
       dockerfile: Dockerfile.dev
     restart: unless-stopped
     environment:
+      # The browser reaches the API through Nginx on one origin, so a path
+      # is right here.
       PUBLIC_API_BASE_URL: /api
+      # Server-side rendering cannot use that path: it would resolve
+      # against the published origin, which inside this container is the
+      # frontend itself. The SSR process calls the API container directly.
+      API_INTERNAL_URL: http://api:3000
       PUBLIC_SITE_URL: http://localhost:${HTTP_PORT:-80}
     networks:
       - modulo-world
