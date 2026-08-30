@@ -1,0 +1,199 @@
+# Production stack. Run on its own, never merged with compose.yaml:
+#
+#   docker compose -f compose.prod.yaml up -d
+#
+# The base file builds from local source and the override file publishes
+# the database port. Neither is true here. Production pulls prebuilt
+# arm64 images from GHCR and publishes only 80 and 443.
+#
+# What production LOSES relative to development is the point: no source
+# mounted, no database port, no build context, no rebuild on the server.
+# Each of those removals is a security property, not an omission.
+
+name: modulo-world
+
+services:
+  postgres:
+    image: postgres:17.2-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # No 'ports'. The database is reachable only on the internal network.
+    # Reaching it from a laptop is done over an SSH tunnel, not by
+    # publishing 5432 to the internet.
+    networks:
+      - modulo-world
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # One-shot: applies pending migrations, then exits. The API waits for it
+  # to complete successfully, so a deploy whose migration fails never gets
+  # as far as serving traffic against a schema that does not match the code.
+  #
+  # Migrations ship inside the backend image, so this needs no checkout on
+  # the server. It runs the same pinned image the API does.
+  migrate:
+    image: ghcr.io/gislamog/modulo-world-backend:${BACKEND_IMAGE_TAG:?BACKEND_IMAGE_TAG is required}
+    restart: "no"
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - modulo-world
+
+  api:
+    # Pinned by commit SHA, never 'latest'. A moving tag cannot identify
+    # what is actually running, which is what makes a rollback possible.
+    image: ghcr.io/gislamog/modulo-world-backend:${BACKEND_IMAGE_TAG:?BACKEND_IMAGE_TAG is required}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      IP_HASH_SALT: ${IP_HASH_SALT:?IP_HASH_SALT is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        # Start only after migrations have applied cleanly.
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - modulo-world
+
+  frontend:
+    image: ghcr.io/gislamog/modulo-world-frontend:${FRONTEND_IMAGE_TAG:?FRONTEND_IMAGE_TAG is required}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # The browser reaches the API through nginx on one origin, so a
+      # path is right here.
+      PUBLIC_API_BASE_URL: /api
+      # SSR cannot use that path: inside this container it would resolve
+      # against the frontend itself. Server-side calls go direct.
+      API_INTERNAL_URL: http://api:3000
+      # Absolute, https, and the apex. Anything canonical the site emits
+      # (meta tags, sitemaps, redirects) is built from this, so a stale
+      # value here surfaces as wrong links rather than as an error.
+      PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:?PUBLIC_SITE_URL is required}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - modulo-world
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/upgrade-map.conf:/etc/nginx/conf.d/00-upgrade-map.conf:ro
+      # Which server block is mounted is a variable, not an edit. The
+      # first deploy uses nginx.bootstrap.conf because nginx will not
+      # start with an ssl_certificate that does not exist yet; once the
+      # certificate is issued, NGINX_CONF flips to nginx.prod.conf.
+      - ./nginx/${NGINX_CONF:-nginx.bootstrap.conf}:/etc/nginx/conf.d/default.conf:ro
+      # Certbot writes certificates here and nginx reads them. Shared
+      # between the two containers by named volume rather than a host
+      # path, so private keys stay under Docker's ownership.
+      - certbot-conf:/etc/letsencrypt:ro
+      # Only used if an HTTP-01 challenge is ever needed. DNS-01 does
+      # not touch it.
+      - certbot-webroot:/var/www/certbot:ro
+    depends_on:
+      frontend:
+        condition: service_started
+      api:
+        condition: service_healthy
+    networks:
+      - modulo-world
+
+  # Renewal loop. Certbot wakes twice a day, renews anything inside 30
+  # days of expiry, and does nothing otherwise. Twice daily is what Let's
+  # Encrypt recommends: it means a failure has roughly 60 chances to
+  # recover before the certificate actually lapses.
+  #
+  # Issuing the FIRST certificate is not done here. It is a one-off
+  # 'docker compose run --rm certbot certonly ...', documented in the
+  # README, because it is interactive in a way a restart loop is not.
+  certbot:
+    image: certbot/dns-cloudflare:v5.1.0
+    restart: unless-stopped
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+      # The Cloudflare API token, scoped to Zone:DNS:Edit on this zone
+      # alone. Mounted read-only from a file that is chmod 600 on the
+      # host. Certbot warns if the file is group or world readable.
+      - ./secrets/cloudflare.ini:/run/secrets/cloudflare.ini:ro
+    # 'renew' exits 0 when there is nothing to do, so the loop is quiet
+    # until it is not. --deploy-hook runs ONLY on an actual renewal.
+    entrypoint: >
+      sh -c 'trap exit TERM;
+             while :; do
+               certbot renew --dns-cloudflare
+                 --dns-cloudflare-credentials /run/secrets/cloudflare.ini
+                 --deploy-hook "touch /etc/letsencrypt/RENEWED";
+               sleep 12h & wait $${!};
+             done'
+    networks:
+      - modulo-world
+
+  # Watches for the marker the deploy hook drops and reloads nginx.
+  #
+  # Why a separate container: certbot runs in its own namespace and
+  # cannot signal the nginx process. The alternatives are mounting the
+  # Docker socket into certbot, which hands a network-facing container
+  # root on the host, or this. A file and a reload is the cheaper trade.
+  #
+  # 'nginx -s reload' finishes in-flight requests on the old workers
+  # before retiring them, so no connection is dropped.
+  cert-reloader:
+    image: docker:29-cli
+    restart: unless-stopped
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      # Read-only socket. This container is not reachable from outside
+      # and runs no network service of its own.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    entrypoint: >
+      sh -c 'trap exit TERM;
+             while :; do
+               if [ -f /etc/letsencrypt/RENEWED ]; then
+                 docker exec modulo-world-nginx-1 nginx -s reload &&
+                 rm -f /etc/letsencrypt/RENEWED;
+               fi;
+               sleep 60 & wait $${!};
+             done'
+    networks:
+      - modulo-world
+
+volumes:
+  postgres-data:
+  # Certificates and the Let's Encrypt account key. Survives 'down'.
+  # Losing this means re-issuing, which is rate limited, so it is the
+  # one volume worth backing up beyond the database.
+  certbot-conf:
+  # Only written during an HTTP-01 challenge. Empty under DNS-01.
+  certbot-webroot:
+
+networks:
+  modulo-world:
