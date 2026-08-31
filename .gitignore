@@ -6,6 +6,11 @@
 # Local-only working notes, not for the repository
 resources-local-only/
 
+# Cloudflare API token for the DNS-01 challenge. Lives only on the
+# server, chmod 600. Committing it would hand over DNS control of the
+# zone, which is enough to issue certificates for it.
+secrets/
+
 # OS
 .DS_Store
 Thumbs.db
