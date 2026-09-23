@@ -95,6 +95,31 @@ It is not in git and has no counterpart in the repository beyond `.env.example`.
 `secrets/cloudflare.ini` holds the Cloudflare API token used for the DNS-01 certificate
 challenge, scoped to `Zone:DNS:Edit` on this zone only. Also `chmod 600`, also gitignored.
 
+## PianoPogo
+
+pianopogo.com is a second, unrelated site that shares this server and this Postgres instance
+rather than getting its own (this box already uses the whole Always Free Ampere allowance, so
+a second free VM isn't available). `piano-pogo-marketing`, `piano-pogo-game`, and
+`piano-pogo-backend` pull pinned GHCR images the same way `frontend` and `api` do; nginx routes
+`pianopogo.com` to them via a second `server_name` block, entirely separate from
+`moduloworld.com`'s.
+
+Its database is a second database on the same Postgres server, not a second container.
+`postgres/init-piano-pogo-db.sh` creates it automatically, but **only when the `postgres-data`
+volume is first created** — since that volume already exists on this server, the database has
+to be created by hand once:
+
+```bash
+docker compose -f compose.prod.yaml exec postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "CREATE DATABASE \"$PIANO_POGO_POSTGRES_DB\" OWNER \"$POSTGRES_USER\";"
+```
+
+`.env` needs `PIANO_POGO_POSTGRES_DB`, `CLERK_SECRET_KEY`, `PIANO_POGO_BACKEND_IMAGE_TAG`,
+`PIANO_POGO_MARKETING_IMAGE_TAG`, and `PIANO_POGO_GAME_IMAGE_TAG` added alongside the existing
+variables. Issuing `pianopogo.com`'s certificate is the same `certbot certonly --dns-cloudflare`
+flow as `moduloworld.com`'s, just naming the new domain.
+
 ## Data
 
 Postgres data is stored in the `postgres-data` named volume, which survives
