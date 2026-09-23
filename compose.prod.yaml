@@ -20,8 +20,13 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      # PianoPogo's database lives on this same Postgres server rather
+      # than a second container. Only read by init-piano-pogo-db.sh,
+      # which only runs the first time postgres-data is created.
+      PIANO_POGO_POSTGRES_DB: ${PIANO_POGO_POSTGRES_DB:?PIANO_POGO_POSTGRES_DB is required}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-piano-pogo-db.sh:/docker-entrypoint-initdb.d/init-piano-pogo-db.sh:ro
     # No 'ports'. The database is reachable only on the internal network.
     # Reaching it from a laptop is done over an SSH tunnel, not by
     # publishing 5432 to the internet.
@@ -98,6 +103,66 @@ services:
     networks:
       - modulo-world
 
+  # PianoPogo. Same server, same Postgres, same nginx: a separate
+  # standalone domain, not a sub-path of moduloworld.com, but not worth
+  # its own VM either (this box already uses the whole Always Free
+  # Ampere allowance).
+  piano-pogo-migrate:
+    image: ghcr.io/gislamog/piano-pogo-backend:${PIANO_POGO_BACKEND_IMAGE_TAG:?PIANO_POGO_BACKEND_IMAGE_TAG is required}
+    restart: "no"
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${PIANO_POGO_POSTGRES_DB:?PIANO_POGO_POSTGRES_DB is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - modulo-world
+
+  piano-pogo-backend:
+    image: ghcr.io/gislamog/piano-pogo-backend:${PIANO_POGO_BACKEND_IMAGE_TAG:?PIANO_POGO_BACKEND_IMAGE_TAG is required}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${PIANO_POGO_POSTGRES_DB:?PIANO_POGO_POSTGRES_DB is required}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?CLERK_SECRET_KEY is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      piano-pogo-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - modulo-world
+
+  piano-pogo-marketing:
+    image: ghcr.io/gislamog/piano-pogo-marketing:${PIANO_POGO_MARKETING_IMAGE_TAG:?PIANO_POGO_MARKETING_IMAGE_TAG is required}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - modulo-world
+
+  piano-pogo-game:
+    image: ghcr.io/gislamog/piano-pogo-game:${PIANO_POGO_GAME_IMAGE_TAG:?PIANO_POGO_GAME_IMAGE_TAG is required}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - modulo-world
+
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
@@ -126,6 +191,12 @@ services:
       frontend:
         condition: service_started
       api:
+        condition: service_healthy
+      piano-pogo-marketing:
+        condition: service_healthy
+      piano-pogo-game:
+        condition: service_healthy
+      piano-pogo-backend:
         condition: service_healthy
     networks:
       - modulo-world
